@@ -229,7 +229,7 @@ write.csv(sigs, file = "tcga_paad_DESeq_high_purity.csv", row.names = TRUE)
 write.xlsx(sigs, file = "tcga_paad_DESeq_high_purity.xlsx", rowNames = TRUE)
 ```
 
-## Post DES analysis
+## Post DESeq analysis
 
 ```{r}
 #match with DDR genes
