@@ -1,0 +1,251 @@
+---
+title: "tcga_paad_ddr"
+format: html
+editor: visual
+---
+
+# TCGA analysis
+
+```{r}
+# load necessary libraries
+library(tidyr)
+library(readxl)
+library(openxlsx)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DESeq2)
+library(ggplot2)
+library(org.Hs.eg.db)
+```
+
+## Download data from TCGA using TCGAbiolinks
+
+```{r}
+# set the working directory
+set("path/to/the/working/directory")
+```
+
+TCGAbiolinks help documents is available at <https://bioconductor.org/packages/release/bioc/vignettes/TCGAbiolinks/inst/doc/query.html> <https://bioconductor.riken.jp/packages/3.3/bioc/vignettes/TCGAbiolinks/inst/doc/tcgaBiolinks.html#updates>
+
+```{r}
+# retrive and view the list of GDC projects
+gdcprojects <- getGDCprojects()
+view(gdcprojects)
+```
+
+```{r}
+# get project summary for TCGA-PAAD
+getProjectSummary('TCGA-PAAD')
+```
+
+```{r}
+# build a query to retrieve gene expression data for TCGA-PAAD
+query_tcga_paad <- GDCquery( project = 'TCGA-PAAD',
+                             data.category = "Transcriptome Profiling",
+                             experimental.strategy = 'RNA-Seq',
+                             workflow.type = "STAR - Counts",
+                             data.type = "Gene Expression Quantification",
+                             sample.type = c("Primary Tumor", "Solid Tissue Normal"),
+                             access = "open")
+output_paad <- getResults(query_tcga_paad) 
+view(output_paad)
+```
+
+```{r}
+# download data using GDCdownload
+GDCdownload(query_tcga_paad)
+```
+
+```{r}
+# check if files are downloaded
+list.files("C:/Users/jayra/Documents/0 r/tcga/paad/GDCdata/TCGA-PAAD/Transcriptome_Profiling/Gene_Expression_Quantification/", recursive = TRUE)
+```
+
+```{r}
+# prepare data
+tcga_paad_data <- GDCprepare(query_tcga_paad, summarizedExperiment = TRUE)
+```
+
+```{r}
+# extract count matrix for DESeq analysis
+paad_matrix_unstrand <- assay(tcga_paad_data, 'unstranded')
+# Remove '-' from column names and assign back to matrix 
+colnames(paad_matrix_unstrand) <- gsub("-", "", colnames(paad_matrix_unstrand))
+# Remove '.' from row names and assign back to matrix 
+rownames(paad_matrix_unstrand) <- substring(rownames(paad_matrix_unstrand), 1, 15)
+paad_matrix_unstrand[1:10,1:10]
+```
+
+```{r}
+#remove low counts
+paad_matrix_unstrand <- paad_matrix_unstrand[rowSums(paad_matrix_unstrand) > 0, ]
+```
+
+## **Analyzing RNA-seq data with DESeq2**
+
+[https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html](https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#countmat){.uri}
+
+It is absolutely critical that the columns of the count matrix and the **rows of the column data** (information about samples) are in the same order. DESeq2 will not make guesses as to which column of the count matrix belongs to which row of the column data, these must be provided to DESeq2 already in consistent order.
+
+```{r}
+# extract gene and sample metadata from summarizedExperiment object
+gene_metadata <- as.data.frame(rowData(tcga_paad_data))
+coldata <- as.data.frame(colData(tcga_paad_data))
+# Remove '-' from row names and assign back to coldata 
+rownames(coldata) <- gsub("-", "", rownames(coldata))
+colnames(coldata) <- gsub("_", "", colnames(coldata))
+coldata$sampletype <- gsub(" ", "", coldata$sampletype)
+```
+
+```{r}
+# select only high purity TCGA-PAAD samples (ref: PMID  28810144)
+high_purity <- read_excel("tcga_paad_high_purity_samples.xlsx")
+# keep only mtaching rows between 'samplesubmitterid' column in 'coldata' and 'sample_id' in 'high_purity'
+high_purity_coldata <- inner_join(coldata, high_purity, by = c("samplesubmitterid" = "sample_id"))
+
+# filter count matrix for high purity samples 
+# in paad_matrix_unstrand keep only columns that matches row values in high_purity_coldata
+# first, make barcode row names for high_purity_coldata and remove '-'
+rownames(high_purity_coldata) <- high_purity_coldata$barcode
+rownames(high_purity_coldata) <- gsub("-", "", rownames(high_purity_coldata))
+
+# in paad_matrix_unstrand keep only columns that matches row values in high_purity_coldata
+high_purity_pmu <- paad_matrix_unstrand[, colnames(paad_matrix_unstrand) %in% rownames(high_purity_coldata)]
+```
+
+## 
+
+```{r}
+# check consistency of row and column names
+# check if all row names of high_purity_coldata are present as column names in high_purity_pmu.
+all(rownames(high_purity_coldata) %in% colnames(high_purity_pmu))
+
+# check if all the row names of high_purity_coldata are exactly equal to all the column names of high_purity_pmu.
+all(rownames(high_purity_coldata) == colnames(high_purity_pmu))
+```
+
+```{r}
+# create DESeqDataSet
+dds <- DESeqDataSetFromMatrix(countData = high_purity_pmu,
+                              colData = high_purity_coldata,
+                              design = ~ sampletype)
+```
+
+```{r}
+# pre-filtering: removing rows with low gene counts
+# keeping rows that have at least >10 reads total
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+```
+
+```{r}
+# set the factor level
+dds$sampletype <- relevel(dds$sampletype, ref = "SolidTissueNormal")
+```
+
+```{r}
+# run DESeq
+dds<- DESeq(dds)
+```
+
+```{r}
+# perform variance stabilization transformation
+vsdata <- vst(dds, blind = FALSE)
+```
+
+```{r}
+#PCA analysis
+plotPCA(vsdata, intgroup = "sampletype")
+
+```
+
+```{r}
+# plot dispersion estimates
+plotDispEsts(dds)
+```
+
+```{r}
+#get DESeq results
+res <- results(dds, contrast = c("sampletype", "PrimaryTumor", "SolidTissueNormal"))
+res
+```
+
+```{r}
+#no contrast
+#res_eg <- results(dds)
+#res_eg
+```
+
+```{r}
+# explore results
+summary(res)
+```
+
+```{r}
+# filter results at 0.05 FDR
+res0.05 <- results(dds, alpha = 0.05)
+summary(res0.05)
+```
+
+```{r}
+res0.05
+```
+
+```{r}
+plotMA(res0.05)
+```
+
+```{r}
+keytypes(org.Hs.eg.db)
+```
+
+```{r}
+# convert ENSEMBL IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db,
+       keys = rownames(res0.05),
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+```{r}
+# add gene symbols as a new column to results
+res0.05$gene_symbols <- gene_symbols
+```
+
+```{r}
+# remove rows with NA or blank values in the gene_symbols column
+res0.05 <- res0.05[!is.na(res0.05$gene_symbols) & res0.05$gene_symbols != "", ]
+```
+
+```{r}
+# significant genes
+sigs <- na.omit(res0.05)
+sigs <- sigs[sigs$padj < 0.05, ]
+```
+
+```{r}
+#  write results to CSV and Excel filess
+write.csv(sigs, file = "tcga_paad_DESeq_high_purity.csv", row.names = TRUE)
+write.xlsx(sigs, file = "tcga_paad_DESeq_high_purity.xlsx", rowNames = TRUE)
+```
+
+## Post DES analysis
+
+```{r}
+#match with DDR genes
+#import ddr genes into r
+ddr_genes <- read.xlsx("ddr_genes/ddr_genes_annoated.xlsx", sheet = 1)
+```
+
+```{r}
+# match significant genes with DDR genes
+sigs_DEGs <- as.data.frame(sigs)
+# convert row names of sigs_DEGs to a column and rename the column
+sigs_DEGs <- data.frame(ensembl_id = rownames(sigs_DEGs), sigs_DEGs, row.names = NULL)
+sigs_ddr <- inner_join(sigs_DEGs, ddr_genes, by = c("ensembl_id" = "ENSEMBL"))
+```
+
+```{r}
+# Write matched genes to file
+write.csv(sigs_ddr, file = "sigs_ddr.csv", row.names = TRUE)
+```
